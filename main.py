@@ -7,6 +7,19 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import accuracy_score, classification_report, confusion_matrix
+import io
+import base64
+
+# Show a matplotlib figure by embedding it directly in the page
+# (avoids Streamlit's media file server, which was returning 500 errors)
+def show_fig(fig):
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", bbox_inches="tight", dpi=100)
+    b64 = base64.b64encode(buf.getvalue()).decode()
+    st.markdown(
+        f'<img src="data:image/png;base64,{b64}" style="width:100%">',
+        unsafe_allow_html=True,
+    )
 
 # Configure the Streamlit page
 st.set_page_config(
@@ -151,7 +164,7 @@ def get_user_input():
         preview_df = pd.DataFrame([sample_row])
         # Display the live preview table
         st.write("**Selected Row Preview:**")
-        st.dataframe(preview_df, use_container_width=True, hide_index=True)
+        st.dataframe(preview_df, width="stretch", hide_index=True)
 
     else:
         # Explain manual input
@@ -238,7 +251,7 @@ def show_prediction(input_data):
     })
 
     # Display result table
-    st.dataframe(result, use_container_width=True, hide_index=True)
+    st.dataframe(result, width="stretch", hide_index=True)
 
     # Check if both models agree
     if dt_pred == rf_pred:
@@ -296,7 +309,7 @@ def handle_batch_prediction():
 
                 # Display the results
                 st.success(f"Predictions generated for {len(result)} rows.")
-                st.dataframe(result, use_container_width=True)
+                st.dataframe(result, width="stretch")
 
                 # Prepare CSV for download
                 csv_bytes = result.to_csv(index=False).encode("utf-8")
@@ -376,7 +389,7 @@ with tab_home:
             ax.set_ylabel("Count")
             ax.tick_params(labelsize=8)
             plt.tight_layout()
-            st.pyplot(fig, use_container_width=True)
+            show_fig(fig)
             plt.close(fig)
     with r1c2:
         with st.container(border=True):
@@ -386,7 +399,7 @@ with tab_home:
             ax.set_ylabel("Count")
             ax.tick_params(labelsize=8)
             plt.tight_layout()
-            st.pyplot(fig, use_container_width=True)
+            show_fig(fig)
             plt.close(fig)
 
     # Row 2: Na_to_K distribution card + Categorical breakdown card
@@ -399,7 +412,7 @@ with tab_home:
             ax.set_ylabel("Count")
             ax.tick_params(labelsize=8)
             plt.tight_layout()
-            st.pyplot(fig, use_container_width=True)
+            show_fig(fig)
             plt.close(fig)
     with r2c2:
         with st.container(border=True):
@@ -412,7 +425,7 @@ with tab_home:
             ax.tick_params(labelsize=8)
             ax.legend(fontsize=6)
             plt.tight_layout()
-            st.pyplot(fig, use_container_width=True)
+            show_fig(fig)
             plt.close(fig)
 
     # Row 3: Correlation heatmap card + Accuracy comparison chart card
@@ -430,7 +443,7 @@ with tab_home:
             )
             ax.tick_params(labelsize=7)
             plt.tight_layout()
-            st.pyplot(fig, use_container_width=True)
+            show_fig(fig)
             plt.close(fig)
     with r3c2:
         with st.container(border=True):
@@ -444,7 +457,7 @@ with tab_home:
             ax.set_ylim(0, 100)
             ax.tick_params(labelsize=8)
             plt.tight_layout()
-            st.pyplot(fig, use_container_width=True)
+            show_fig(fig)
             plt.close(fig)
 
     # Row 4: Confusion matrices, one card per model
@@ -465,7 +478,7 @@ with tab_home:
             ax.set_ylabel("Actual", fontsize=8)
             ax.tick_params(labelsize=7)
             plt.tight_layout()
-            st.pyplot(fig, use_container_width=True)
+            show_fig(fig)
             plt.close(fig)
     with r4c2:
         with st.container(border=True):
@@ -481,7 +494,7 @@ with tab_home:
             ax.set_ylabel("Actual", fontsize=8)
             ax.tick_params(labelsize=7)
             plt.tight_layout()
-            st.pyplot(fig, use_container_width=True)
+            show_fig(fig)
             plt.close(fig)
 
     # Detailed classification reports kept compact inside an expander
@@ -490,11 +503,11 @@ with tab_home:
         with rep_col1:
             st.write("**Decision Tree**")
             dt_report = classification_report(Y_test, DT_predict, output_dict=True, zero_division=0)
-            st.dataframe(pd.DataFrame(dt_report).transpose(), use_container_width=True)
+            st.dataframe(pd.DataFrame(dt_report).transpose(), width="stretch")
         with rep_col2:
             st.write("**Random Forest**")
             rf_report = classification_report(Y_test, RF_predict, output_dict=True, zero_division=0)
-            st.dataframe(pd.DataFrame(rf_report).transpose(), use_container_width=True)
+            st.dataframe(pd.DataFrame(rf_report).transpose(), width="stretch")
 
 # Display Predictor tab content
 with tab_predict:
