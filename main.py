@@ -23,7 +23,7 @@ def show_fig(fig):
 
 # Configure the Streamlit page
 st.set_page_config(
-    page_title="DrugVision",
+    page_title="Drug Vision",
     page_icon="💊",
     layout="wide"
 )
@@ -92,7 +92,7 @@ processed_data = processed_data[feature_order]
 Y_test, DT_predict, RF_predict = prepare_evaluation_data(dt_model, rf_model, processed_data)
 
 # Display the app title
-st.title("💊 DrugVision")
+st.title("💊 Drug Vision")
 # Display the app description
 st.write("Drug Type Classification using Machine Learning")
 
@@ -100,7 +100,7 @@ st.write("Drug Type Classification using Machine Learning")
 st.divider()
 
 # Create top navigation bar using tabs
-tab_home, tab_predict = st.tabs(["🏠 Home", "🔮 Predictor"])
+tab_home, tab_predict = st.tabs(["🏠 Home", "🔮 Classifier"])
 
 # Small helper to keep chart sizes consistent and compact for card layout
 CARD_FIGSIZE = (4.5, 3)
@@ -238,7 +238,7 @@ def get_user_input():
 # Function to show predictions from both models combined into one result
 def show_prediction(input_data):
     # Display section title
-    st.subheader("Prediction Result")
+    st.subheader("Classification Result")
 
     # Generate predictions from both models
     dt_pred = dt_model.predict(input_data)[0]
@@ -247,7 +247,7 @@ def show_prediction(input_data):
     # Build result table combining both models
     result = pd.DataFrame({
         "Model": ["Decision Tree", "Random Forest"],
-        "Predicted Drug": [dt_pred, rf_pred]
+        "Classified Drug": [dt_pred, rf_pred]
     })
 
     # Display result table
@@ -255,14 +255,14 @@ def show_prediction(input_data):
 
     # Check if both models agree
     if dt_pred == rf_pred:
-        st.success(f"✅ Predicted Drug: {dt_pred}")
+        st.success(f"✅ Classified Drug: {dt_pred}")
     else:
         st.warning(f"⚠️ Models disagree — Decision Tree: {dt_pred}, Random Forest: {rf_pred}")
 
 # Function to handle batch prediction from an uploaded CSV using both models
 def handle_batch_prediction():
     # Display section title
-    st.subheader("📂 Batch Prediction from CSV")
+    st.subheader("📂 Batch Classification from CSV")
     # Explain expected format
     st.write("Upload a CSV file with the following columns: Age, Sex, BP, Cholesterol, Na_to_K")
 
@@ -304,20 +304,20 @@ def handle_batch_prediction():
 
                 # Generate predictions from both models
                 result = batch_data.copy()
-                result["Decision Tree Prediction"] = dt_model.predict(X_batch_final)
-                result["Random Forest Prediction"] = rf_model.predict(X_batch_final)
+                result["Decision Tree Classification"] = dt_model.predict(X_batch_final)
+                result["Random Forest Classification"] = rf_model.predict(X_batch_final)
 
                 # Display the results
-                st.success(f"Predictions generated for {len(result)} rows.")
+                st.success(f"Classifications generated for {len(result)} rows.")
                 st.dataframe(result, width="stretch")
 
                 # Prepare CSV for download
                 csv_bytes = result.to_csv(index=False).encode("utf-8")
                 # Display download button
                 st.download_button(
-                    "⬇️ Download Predictions as CSV",
+                    "⬇️ Download Classifications as CSV",
                     data=csv_bytes,
-                    file_name="drug_predictions.csv",
+                    file_name="drug_classifications.csv",
                     mime="text/csv",
                     key="batch_download"
                 )
@@ -512,15 +512,15 @@ with tab_home:
 # Display Predictor tab content
 with tab_predict:
     # Display page title
-    st.header("🔮 Predictor")
+    st.header("🔮 Classifier")
     # Display page description
-    st.write("Enter patient details manually or load a sample row, then predict the recommended drug.")
+    st.write("Enter patient details manually or load a sample row, then classify the recommended drug.")
 
     # Get user input
     input_data = get_user_input()
 
     # Predict drug type
-    if st.button("🔮 Predict Drug", type="primary"):
+    if st.button("🔮 Classify Drug", type="primary"):
         # Show the combined prediction result
         show_prediction(input_data)
 
