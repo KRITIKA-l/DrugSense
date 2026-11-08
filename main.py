@@ -7,6 +7,9 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import accuracy_score, classification_report, confusion_matrix
+from sklearn.inspection import permutation_importance, PartialDependenceDisplay
+from sklearn.tree import plot_tree, export_text
+import shap
 import io
 import base64
 
@@ -71,7 +74,7 @@ def prepare_evaluation_data(_dt_model, _rf_model, processed_data):
     # Generate predictions
     DT_predict = _dt_model.predict(X_test)
     RF_predict = _rf_model.predict(X_test)
-    return (Y_test, DT_predict, RF_predict)
+    return (X_test, Y_test, DT_predict, RF_predict)
 
 # Load the dataset
 data = load_data()
@@ -89,7 +92,222 @@ feature_order = ["Age", "Sex", "Cholesterol", "Na_to_K", "HIGH", "LOW", "NORMAL"
 processed_data = processed_data[feature_order]
 
 # Prepare model evaluation data
-Y_test, DT_predict, RF_predict = prepare_evaluation_data(dt_model, rf_model, processed_data)
+X_test, Y_test, DT_predict, RF_predict = prepare_evaluation_data(dt_model, rf_model, processed_data)
+
+# ---------------------------------------------------------------------------
+# Explainable AI (XAI) helpers
+# Everything below is computed from the loaded models and the input data.
+# ---------------------------------------------------------------------------
+
+# Feature names and class labels are read from the trained models themselves
+FEATURES = list(dt_model.feature_names_in_)
+CLASSES = list(rf_model.classes_)
+BP_COLS = ["HIGH", "LOW", "NORMAL"]
+
+# Describe one feature value in plain English
+def describe_value(feature, value):
+    # One-hot BP columns (value is 0 or 1)
+    if feature in BP_COLS:
+        return f"BP is {'' if int(value) == 1 else 'not '}{feature}"
+    # Sex was encoded F -> 1, M -> 0
+    if feature == "Sex":
+        return f"Sex is {'F' if int(value) == 1 else 'M'}"
+    # Cholesterol was label-encoded with the saved encoder
+    if feature == "Cholesterol":
+        return f"Cholesterol is {cholesterol_encoder.inverse_transform([int(value)])[0]}"
+    # Numeric features
+    return f"{feature} = {value:g}"
+
+# Turn one decision-tree split into a plain-English sentence
+def describe_split(feature, value, threshold):
+    goes_left = value <= threshold
+    # Binary / encoded features: describe the side the patient fell on
+    if feature in BP_COLS + ["Sex", "Cholesterol"]:
+        return describe_value(feature, value)
+    # Numeric features: show the comparison against the learned threshold
+    op = "≤" if goes_left else ">"
+    return f"{feature} = {value:.2f} {op} {threshold:.2f}"
+
+# Build the SHAP explainer for the Random Forest only once
+@st.cache_resource
+def load_explainer(_model):
+    return shap.TreeExplainer(_model)
+
+# SHAP values for a whole dataset (used for the global SHAP views)
+@st.cache_resource
+def get_global_shap(_model, _X):
+    return load_explainer(_model)(_X, check_additivity=False)
+
+# Permutation importance with its spread across repeats
+@st.cache_data
+def get_perm_importance(_model, X_eval, Y_eval, model_name):
+    result = permutation_importance(
+        _model, X_eval, Y_eval, n_repeats=20, random_state=48
+    )
+    return pd.DataFrame(
+        {"mean": result.importances_mean, "std": result.importances_std},
+        index=FEATURES
+    ).sort_values("mean")
+
+# Local explanation for the Decision Tree: the exact rules this patient followed
+def explain_dt(input_data, dt_pred):
+    tree = dt_model.tree_
+    path_nodes = dt_model.decision_path(input_data).indices
+    leaf = dt_model.apply(input_data)[0]
+    st.write(f"The Decision Tree classified this patient as **{dt_pred}** by following these rules, in order:")
+    step = 1
+    for node in path_nodes:
+        # The last node is the leaf, which has no rule
+        if node == leaf:
+            continue
+        feature = FEATURES[tree.feature[node]]
+        value = input_data.iloc[0][feature]
+        st.write(f"{step}. {describe_split(feature, value, tree.threshold[node])}")
+        step += 1
+    # Show how pure the final leaf is (share of training samples with the predicted drug)
+    leaf_counts = tree.value[leaf][0]
+    purity = leaf_counts.max() / leaf_counts.sum()
+    st.caption(
+        f"Final leaf: {int(leaf_counts.sum())} training sample(s) reached it and "
+        f"{purity:.0%} of them were {dt_pred}."
+    )
+
+# Write a plain-English summary from the SHAP values of one prediction
+def rf_narrative(sv, class_index, drug, proba):
+    # SHAP contribution of every feature towards the predicted drug
+    contrib = pd.Series(sv.values[0, :, class_index], index=FEATURES)
+    base_value = float(np.atleast_2d(sv.base_values)[0, class_index])
+    feature_values = dict(zip(FEATURES, sv.data[0]))
+    # Strongest factors for and against the predicted drug
+    ups = contrib[contrib > 0.005].sort_values(ascending=False).head(3)
+    downs = contrib[contrib < -0.005].sort_values().head(3)
+
+    lines = [
+        f"The Random Forest gives **{drug}** a probability of **{proba:.0%}**. "
+        f"Across the training data the average probability for this drug is {base_value:.0%}, "
+        f"so this patient's details moved it by **{proba - base_value:+.0%}**."
+    ]
+    if len(ups):
+        lines.append("\n**Factors pushing towards this drug:**")
+        for f, v in ups.items():
+            lines.append(f"- {describe_value(f, feature_values[f])} → {v:+.2f}")
+    if len(downs):
+        lines.append("\n**Factors pushing against it:**")
+        for f, v in downs.items():
+            lines.append(f"- {describe_value(f, feature_values[f])} → {v:+.2f}")
+    if not len(downs):
+        lines.append("\nNo feature pushed meaningfully against this drug.")
+    return "\n".join(lines)
+
+# Local explanation for the Random Forest: text summary + SHAP waterfall
+def explain_rf(input_data, rf_pred):
+    try:
+        explainer = load_explainer(rf_model)
+        sv = explainer(input_data, check_additivity=False)
+        class_index = CLASSES.index(rf_pred)
+        proba = rf_model.predict_proba(input_data)[0][class_index]
+        # Plain-English summary first
+        st.markdown(rf_narrative(sv, class_index, rf_pred, proba))
+        # Then the waterfall chart
+        plt.figure()
+        shap.plots.waterfall(sv[0, :, class_index], show=False)
+        fig = plt.gcf()
+        show_fig(fig)
+        plt.close(fig)
+        st.caption(
+            "Red bars push the probability of this drug up, blue bars push it down. "
+            "Values are probabilities (0 to 1) and add up from the average to the final prediction."
+        )
+    except Exception as e:
+        st.warning(f"SHAP explanation could not be generated: {e}")
+
+# One-feature-at-a-time what-if analysis on the Random Forest
+def find_counterfactuals(input_data, model, current_pred):
+    base = input_data.iloc[0]
+    # Candidate values to try for every feature
+    candidates = {
+        "Age": [{"Age": a} for a in range(int(data["Age"].min()), int(data["Age"].max()) + 1)],
+        "Na_to_K": [{"Na_to_K": v} for v in np.linspace(data["Na_to_K"].min(), data["Na_to_K"].max(), 200)],
+        "Sex": [{"Sex": s} for s in (0, 1) if s != base["Sex"]],
+        "Cholesterol": [{"Cholesterol": c} for c in range(len(cholesterol_encoder.classes_)) if c != base["Cholesterol"]],
+        "BP": [{c2: int(c2 == c) for c2 in BP_COLS} for c in BP_COLS if base[c] != 1],
+    }
+    findings = []
+    for name, changes in candidates.items():
+        # Build one row per candidate change and predict them all at once
+        rows = pd.DataFrame([base] * len(changes)).reset_index(drop=True)
+        for i, change in enumerate(changes):
+            for col, val in change.items():
+                rows.loc[i, col] = val
+        preds = model.predict(rows[FEATURES])
+        flipped = [i for i, p in enumerate(preds) if p != current_pred]
+        if not flipped:
+            continue
+        # Choose the smallest change that flips the prediction
+        if name in ("Age", "Na_to_K"):
+            best = min(flipped, key=lambda i: abs(changes[i][name] - base[name]))
+            old_text = describe_value(name, base[name])
+            new_text = describe_value(name, round(changes[best][name], 2))
+        elif name == "BP":
+            best = flipped[0]
+            old_text = "BP is " + next(c for c in BP_COLS if base[c] == 1)
+            new_text = "BP is " + next(c for c in BP_COLS if changes[best][c] == 1)
+        else:
+            best = flipped[0]
+            old_text = describe_value(name, base[name])
+            new_text = describe_value(name, changes[best][name])
+        findings.append(f"- {old_text}  →  {new_text}: prediction becomes **{preds[best]}**")
+    return findings
+
+# Full explanation section shown under a prediction
+def show_explanation(input_data, dt_pred, rf_pred):
+    st.subheader("🔍 Why this result?")
+
+    # Confidence of both models for every drug
+    dt_proba = dt_model.predict_proba(input_data)[0]
+    rf_proba = rf_model.predict_proba(input_data)[0]
+    proba_df = pd.DataFrame({
+        "Drug": CLASSES,
+        "Decision Tree (%)": dt_proba * 100,
+        "Random Forest (%)": rf_proba * 100,
+    })
+    c1, c2 = st.columns(2)
+    with c1:
+        st.write("**Prediction confidence by drug**")
+        st.dataframe(proba_df.round(1), width="stretch", hide_index=True)
+    with c2:
+        fig, ax = plt.subplots(figsize=CARD_FIGSIZE)
+        proba_df.set_index("Drug").plot.bar(ax=ax)
+        ax.set_ylabel("Probability (%)", fontsize=8)
+        ax.set_xlabel("")
+        ax.tick_params(labelsize=8)
+        ax.legend(fontsize=7)
+        plt.tight_layout()
+        show_fig(fig)
+        plt.close(fig)
+
+    # One sub-tab per way of explaining
+    t_rf, t_dt, t_whatif = st.tabs(["🌲 Random Forest (SHAP)", "🌳 Decision Tree (rules)", "🔁 What-if"])
+    with t_rf:
+        explain_rf(input_data, rf_pred)
+    with t_dt:
+        explain_dt(input_data, dt_pred)
+    with t_whatif:
+        st.write(
+            f"Smallest single change (one feature at a time) that would flip the "
+            f"Random Forest's prediction away from **{rf_pred}**:"
+        )
+        findings = find_counterfactuals(input_data, rf_model, rf_pred)
+        if findings:
+            st.markdown("\n".join(findings))
+            st.caption("Features not listed cannot change the prediction on their own, so the result is stable against them.")
+        else:
+            st.success("No single-feature change flips this prediction, so it is quite stable.")
+
+    st.caption(
+        "These explanations show what the models rely on. "
+        "They do not prove a medical cause and are not medical advice."
+    )
 
 # Display the app title
 st.title("💊 Drug Vision")
@@ -100,7 +318,7 @@ st.write("Drug Type Classification using Machine Learning")
 st.divider()
 
 # Create top navigation bar using tabs
-tab_home, tab_predict = st.tabs(["🏠 Home", "🔮 Classifier"])
+tab_home, tab_predict, tab_xai = st.tabs(["🏠 Home", "🔮 Classifier", "🔍 Explainability"])
 
 # Small helper to keep chart sizes consistent and compact for card layout
 CARD_FIGSIZE = (4.5, 3)
@@ -258,6 +476,9 @@ def show_prediction(input_data):
         st.success(f"✅ Classified Drug: {dt_pred}")
     else:
         st.warning(f"⚠️ Models disagree — Decision Tree: {dt_pred}, Random Forest: {rf_pred}")
+
+    # Explain both predictions in detail
+    show_explanation(input_data, dt_pred, rf_pred)
 
 # Function to handle batch prediction from an uploaded CSV using both models
 def handle_batch_prediction():
@@ -528,3 +749,129 @@ with tab_predict:
     st.divider()
     # Show batch prediction section
     handle_batch_prediction()
+
+
+# Display Explainability tab content
+with tab_xai:
+    st.header("🔍 Explainability")
+    st.write(
+        "These views show how the two models make decisions in general. "
+        "To see the reasoning for one specific patient, use the Classifier tab."
+    )
+    with st.expander("How to read these charts"):
+        st.markdown(
+            "- **Permutation importance**: shuffle one feature and measure how much accuracy drops. "
+            "A bigger drop means the model depends on that feature more.\n"
+            "- **Impurity importance**: how much each feature reduced uncertainty inside the trees while they were trained. "
+            "It can favour features with many possible split points, so compare it with permutation importance.\n"
+            "- **SHAP**: splits a prediction into a contribution from each feature. "
+            "The average size of these contributions shows overall influence per drug.\n"
+            "- **Partial dependence**: how the predicted probability of a drug changes as one feature changes, with the others averaged out."
+        )
+
+    # ---- 1. Feature importance ----
+    st.subheader("1. Which features matter overall?")
+    models_info = [("Decision Tree", dt_model), ("Random Forest", rf_model)]
+
+    st.write("**Permutation importance** (test set, bars show spread over 20 shuffles)")
+    p1, p2 = st.columns(2)
+    for col, (name, model) in zip([p1, p2], models_info):
+        with col:
+            with st.container(border=True):
+                st.write(name)
+                imp = get_perm_importance(model, X_test, Y_test, name)
+                fig, ax = plt.subplots(figsize=CARD_FIGSIZE)
+                ax.barh(imp.index, imp["mean"], xerr=imp["std"])
+                ax.set_xlabel("Accuracy drop when shuffled", fontsize=8)
+                ax.tick_params(labelsize=8)
+                plt.tight_layout()
+                show_fig(fig)
+                plt.close(fig)
+
+    st.write("**Impurity-based importance** (from training)")
+    i1, i2 = st.columns(2)
+    for col, (name, model) in zip([i1, i2], models_info):
+        with col:
+            with st.container(border=True):
+                st.write(name)
+                imp2 = pd.Series(model.feature_importances_, index=FEATURES).sort_values()
+                fig, ax = plt.subplots(figsize=CARD_FIGSIZE)
+                imp2.plot.barh(ax=ax)
+                ax.set_xlabel("Importance", fontsize=8)
+                ax.tick_params(labelsize=8)
+                plt.tight_layout()
+                show_fig(fig)
+                plt.close(fig)
+
+    # ---- 2. Global SHAP ----
+    st.subheader("2. Random Forest: how features push each drug (SHAP)")
+    try:
+        global_sv = get_global_shap(rf_model, X_test)
+        # Average absolute SHAP value per feature and per drug
+        mean_abs = pd.DataFrame(
+            np.abs(global_sv.values).mean(axis=0), index=FEATURES, columns=CLASSES
+        )
+        mean_abs = mean_abs.loc[mean_abs.sum(axis=1).sort_values().index]
+        s1, s2 = st.columns(2)
+        with s1:
+            with st.container(border=True):
+                st.write("**Average influence per feature, split by drug**")
+                fig, ax = plt.subplots(figsize=CARD_FIGSIZE)
+                mean_abs.plot.barh(stacked=True, ax=ax)
+                ax.set_xlabel("Mean |SHAP value|", fontsize=8)
+                ax.tick_params(labelsize=8)
+                ax.legend(fontsize=6)
+                plt.tight_layout()
+                show_fig(fig)
+                plt.close(fig)
+        with s2:
+            with st.container(border=True):
+                chosen_drug = st.selectbox("Drug to inspect", CLASSES, key="shap_drug")
+                st.write(f"**Detailed SHAP view for {chosen_drug}**")
+                plt.figure()
+                shap.plots.beeswarm(global_sv[:, :, CLASSES.index(chosen_drug)], show=False)
+                fig = plt.gcf()
+                show_fig(fig)
+                plt.close(fig)
+                st.caption(
+                    "Each dot is one test patient. Dots to the right raised the probability of this drug. "
+                    "Red means a high feature value, blue means a low one."
+                )
+    except Exception as e:
+        st.warning(f"Global SHAP view could not be generated: {e}")
+
+    # ---- 3. Decision tree structure ----
+    st.subheader("3. Decision Tree: the learned rules")
+    max_depth_shown = st.slider(
+        "Depth to display", 1, int(dt_model.get_depth()), min(3, int(dt_model.get_depth())), key="tree_depth"
+    )
+    with st.container(border=True):
+        fig, ax = plt.subplots(figsize=(14, 6))
+        plot_tree(
+            dt_model, feature_names=FEATURES, class_names=CLASSES,
+            filled=True, rounded=True, max_depth=max_depth_shown, fontsize=7, ax=ax
+        )
+        show_fig(fig)
+        plt.close(fig)
+    with st.expander("📜 Full rules as text"):
+        st.code(export_text(dt_model, feature_names=FEATURES))
+
+    # ---- 4. Partial dependence ----
+    st.subheader("4. Random Forest: partial dependence")
+    pd1, pd2 = st.columns(2)
+    with pd1:
+        pdp_feature = st.selectbox("Feature", FEATURES, index=FEATURES.index(get_perm_importance(rf_model, X_test, Y_test, "Random Forest").index[-1]), key="pdp_feature")
+    with pd2:
+        pdp_drug = st.selectbox("Drug", CLASSES, key="pdp_drug")
+    try:
+        with st.container(border=True):
+            fig, ax = plt.subplots(figsize=(7, 3.5))
+            PartialDependenceDisplay.from_estimator(
+                rf_model, X_test, [pdp_feature], target=pdp_drug, ax=ax
+            )
+            ax.set_ylabel(f"Predicted probability of {pdp_drug}", fontsize=8)
+            plt.tight_layout()
+            show_fig(fig)
+            plt.close(fig)
+    except Exception as e:
+        st.warning(f"Partial dependence plot could not be generated: {e}")
